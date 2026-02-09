@@ -1,0 +1,14 @@
+[package]
+name = "sqrt-parser"
+description = "SQRT policy language parser for the Security Compass engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pest = { workspace = true }
+pest_derive = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

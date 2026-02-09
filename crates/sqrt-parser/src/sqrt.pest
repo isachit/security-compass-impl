@@ -1,0 +1,395 @@
+// SQRT Policy Language Grammar (pest PEG)
+// Faithfully translated from grammar.lark (Lark Earley)
+//
+// Key differences from Lark:
+// - PEG uses ordered choice (/) instead of unordered (|)
+// - Left-recursion rewritten as repetition (PEG cannot handle left-recursion)
+// - Whitespace handled explicitly via WHITESPACE and COMMENT rules
+// - pest uses ~ for sequences, | for ordered choice
+
+// ============================================================
+// Whitespace and Comments (implicit — pest auto-inserts between tokens)
+// ============================================================
+
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+
+// Doc comments: /// followed by content (NOT ignored — captured as tokens)
+DOC_COMMENT = @{ "///" ~ (!NEWLINE ~ ANY)* }
+
+// Regular comments: // but NOT /// (ignored)
+COMMENT = _{ (!("///") ~ "//" ~ (!NEWLINE ~ ANY)*) | ("/*" ~ (!"*/" ~ ANY)* ~ "*/") }
+
+// ============================================================
+// Program Structure
+// ============================================================
+
+program = { SOI ~ declaration* ~ EOI }
+
+declaration = { doc_comments ~ (let_decl | tool_decl | tool_shorthand) }
+
+doc_comments = { DOC_COMMENT* }
+
+// ============================================================
+// Let Declarations
+// ============================================================
+
+let_decl = { "let" ~ IDENTIFIER ~ "=" ~ expression ~ ";" }
+
+// ============================================================
+// Tool Declarations (Full Form)
+// ============================================================
+
+tool_decl = { "tool" ~ tool_id ~ "{" ~ tool_member* ~ "}" }
+
+tool_id = { REGEX_STRING | STRING }
+
+tool_member = {
+    doc_comments ~ (priority_decl | check_rule | result_block | session_block)
+}
+
+priority_decl = { "priority" ~ INT ~ ";" }
+
+// ============================================================
+// Tool Shorthand Syntax
+// ============================================================
+
+tool_shorthand = { "tool" ~ tool_id ~ shorthand_priority? ~ "->" ~ shorthand_body ~ ";" }
+
+shorthand_priority = { "[" ~ INT ~ "]" }
+
+shorthand_body = { shorthand_target? ~ shorthand_update ~ shorthand_condition? }
+
+shorthand_target = {
+    "session" ~ "before"
+    | "session" ~ "after"
+    | "session"
+    | "result"
+}
+
+shorthand_update = {
+    "@" ~ META_FIELD ~ augmented_assign_op ~ set_expression
+    | "@" ~ META_FIELD ~ "=" ~ set_expression
+}
+
+shorthand_condition = { "when" ~ predicate }
+
+augmented_assign_op = { "|=" | "&=" | "-=" | "^=" }
+
+// ============================================================
+// Check Rules
+// ============================================================
+
+check_rule = { enforcement ~ outcome ~ condition_clause ~ ";" }
+
+enforcement = { "must" | "hard" | "should" | "soft" }
+
+outcome = { "allow" | "deny" }
+
+condition_clause = { "when" ~ predicate | "always" }
+
+// ============================================================
+// Result Block
+// ============================================================
+
+result_block = { "result" ~ "{" ~ result_stmt* ~ "}" }
+
+result_stmt = { doc_comments ~ (result_conditional | result_update ~ ";") }
+
+result_conditional = { "when" ~ predicate ~ "{" ~ result_update_inner* ~ "}" }
+
+result_update_inner = { result_update ~ ";" }
+
+result_update = {
+    update_target ~ augmented_assign_op ~ set_expression
+    | update_target ~ "=" ~ set_expression
+}
+
+// ============================================================
+// Session Block
+// ============================================================
+
+session_block = { "session" ~ session_timing ~ "{" ~ session_stmt* ~ "}" }
+
+session_timing = { "before" | "after" }
+
+session_stmt = { doc_comments ~ (session_conditional | session_update ~ ";") }
+
+session_conditional = { "when" ~ predicate ~ "{" ~ session_update_inner* ~ "}" }
+
+session_update_inner = { session_update ~ ";" }
+
+session_update = {
+    update_target ~ augmented_assign_op ~ set_expression
+    | update_target ~ "=" ~ set_expression
+}
+
+// ============================================================
+// Update Target (shared by result and session blocks)
+// ============================================================
+
+update_target = {
+    "@result" ~ "." ~ META_FIELD
+    | "@session" ~ "." ~ META_FIELD
+    | "@" ~ META_FIELD
+    | IDENTIFIER ~ "." ~ META_FIELD
+}
+
+META_FIELD = @{ "tags" | "producers" | "consumers" }
+
+// ============================================================
+// Expressions
+// ============================================================
+
+expression = { predicate | set_expression | type_domain }
+
+// ============================================================
+// Predicates (Boolean Expressions)
+// Precedence (low→high): or, and, not, atom
+// Lark uses left-recursion; PEG uses repetition.
+// ============================================================
+
+predicate = { predicate_and ~ ("or" ~ predicate_and)* }
+
+predicate_and = { predicate_not ~ ("and" ~ predicate_not)* }
+
+predicate_not = { "not" ~ predicate_not | predicate_atom }
+
+predicate_atom = {
+    comparison
+    | "(" ~ predicate ~ ")"
+    | IDENTIFIER
+}
+
+// ============================================================
+// Comparisons
+// ============================================================
+
+comparison = { value_comparison | set_comparison }
+
+value_comparison = {
+    value_operand ~ "in" ~ set_expression
+    | value_operand ~ "==" ~ value_operand
+}
+
+set_comparison = {
+    set_operand ~ "overlaps" ~ set_expression
+    | set_operand ~ "subset" ~ "of" ~ set_expression
+    | set_operand ~ "superset" ~ "of" ~ set_expression
+    | set_operand ~ "==" ~ set_expression
+    | set_operand ~ "is" ~ "empty"
+    | set_operand ~ "is" ~ "universal"
+}
+
+// ============================================================
+// Set Expressions
+// Precedence (low→high): xor, minus, intersect, union, with/without, atom
+// PEG: rewrite left-recursion as left-associative repetition.
+// ============================================================
+
+set_expression = { set_minus ~ (set_xor_op ~ set_minus)* }
+
+set_minus = { set_intersect ~ (set_minus_op ~ set_intersect)* }
+
+set_intersect = { set_union ~ (set_intersect_op ~ set_union)* }
+
+set_union = { set_element_op ~ (set_union_op ~ set_element_op)* }
+
+set_element_op = { set_atom ~ (("with" | "without") ~ element)* }
+
+set_atom = {
+    set_literal
+    | set_operand
+    | "(" ~ set_expression ~ ")"
+    | IDENTIFIER
+}
+
+// Set operators (symbol and keyword forms)
+
+set_union_op = { "|" ~ !"=" | "union" }
+set_intersect_op = { "&" ~ !"=" | "intersect" }
+set_minus_op = { "-" ~ !"=" | "minus" }
+set_xor_op = { "^" ~ !"=" | "xor" }
+
+// ============================================================
+// Set Operands (Metadata Field Accessors)
+// ============================================================
+
+set_operand = {
+    args_meta_access
+    | result_meta_access
+    | session_meta_access
+    | arg_meta_access
+    | context_meta_access
+    | aggregation
+}
+
+arg_meta_access = { IDENTIFIER ~ "." ~ META_FIELD }
+
+result_meta_access = { "@result" ~ "." ~ META_FIELD }
+
+session_meta_access = { "@session" ~ "." ~ META_FIELD }
+
+context_meta_access = { "@" ~ META_FIELD }
+
+aggregation = { agg_op ~ "of" ~ META_FIELD ~ "from" ~ "args" }
+
+args_meta_access = { "@args" ~ "." ~ META_FIELD ~ agg_suffix? }
+
+agg_suffix = { "." ~ ("union" | "intersect") }
+
+agg_op = { "union" | "intersect" }
+
+// ============================================================
+// Value Operands
+// ============================================================
+
+value_operand = {
+    result_value_access
+    | session_value_access
+    | arg_value_access
+    | literal
+}
+
+arg_value_access = { IDENTIFIER ~ "." ~ "value" }
+
+result_value_access = { "@result" ~ "." ~ "value" }
+
+session_value_access = { "@session" ~ "." ~ "value" }
+
+// ============================================================
+// Set Literals
+// ============================================================
+
+set_literal = {
+    "{" ~ "}"
+    | "{" ~ element_list ~ "}"
+}
+
+element_list = { element ~ ("," ~ element)* }
+
+element = { string_element | type_domain | number }
+
+string_element = { REGEX_STRING | WILDCARD_STRING | STRING }
+
+// ============================================================
+// Type Domains (Value Constraints)
+// ============================================================
+
+type_domain = { bool_domain | int_domain | float_domain | str_domain | datetime_domain }
+
+bool_domain = { "bool" ~ BOOL }
+
+int_domain = { "int" ~ range_spec }
+
+float_domain = { "float" ~ range_spec }
+
+str_domain = { "str" ~ str_pattern ~ length_spec? }
+
+datetime_domain = { "datetime" ~ datetime_spec }
+
+// Range specifications
+// Order matters: longest operator match first (PEG greedy)
+range_spec = {
+    number ~ RANGE_EXCLUSIVE_BOTH ~ number
+    | number ~ RANGE_EXCLUSIVE_LEFT ~ number
+    | number ~ RANGE_EXCLUSIVE_RIGHT ~ number
+    | number ~ RANGE_INCLUSIVE ~ number
+    | RANGE_EXCLUSIVE_RIGHT ~ number
+    | RANGE_INCLUSIVE ~ number
+    | number ~ RANGE_EXCLUSIVE_LEFT
+    | number ~ RANGE_INCLUSIVE
+    | number
+}
+
+// Range operators — order matters: longest match first
+RANGE_EXCLUSIVE_BOTH = @{ "<..<" }
+RANGE_EXCLUSIVE_LEFT = @{ "<.." }
+RANGE_EXCLUSIVE_RIGHT = @{ "..<" }
+RANGE_INCLUSIVE = @{ ".." }
+
+// String patterns
+str_pattern = {
+    "matching" ~ REGEX_STRING
+    | "like" ~ WILDCARD_STRING
+    | STRING
+}
+
+length_spec = { "length" ~ range_spec }
+
+// Datetime specifications
+datetime_spec = {
+    DATETIME_STRING ~ RANGE_EXCLUSIVE_BOTH ~ DATETIME_STRING
+    | DATETIME_STRING ~ RANGE_EXCLUSIVE_LEFT ~ DATETIME_STRING
+    | DATETIME_STRING ~ RANGE_EXCLUSIVE_RIGHT ~ DATETIME_STRING
+    | DATETIME_STRING ~ RANGE_INCLUSIVE ~ DATETIME_STRING
+    | RANGE_EXCLUSIVE_RIGHT ~ DATETIME_STRING
+    | RANGE_INCLUSIVE ~ DATETIME_STRING
+    | DATETIME_STRING ~ RANGE_EXCLUSIVE_LEFT
+    | DATETIME_STRING ~ RANGE_INCLUSIVE
+    | DATETIME_STRING
+    | STRING
+    | number
+}
+
+// ============================================================
+// Literals
+// ============================================================
+
+literal = {
+    DATETIME_STRING
+    | BOOL
+    | number
+    | STRING
+}
+
+number = { FLOAT | INT | INF }
+
+// ============================================================
+// Terminals
+// ============================================================
+
+BOOL = @{ "true" | "false" }
+
+// String literals with escape support
+// pest: use inner/outer pattern for content extraction
+STRING = ${ "\"" ~ STRING_INNER ~ "\"" }
+STRING_INNER = @{ (ESCAPE_SEQ | !("\"" | "\\") ~ ANY)* }
+
+REGEX_STRING = ${ "r\"" ~ REGEX_STRING_INNER ~ "\"" }
+REGEX_STRING_INNER = @{ (ESCAPE_SEQ | !("\"" | "\\") ~ ANY)* }
+
+WILDCARD_STRING = ${ "w\"" ~ WILDCARD_STRING_INNER ~ "\"" }
+WILDCARD_STRING_INNER = @{ (ESCAPE_SEQ | !("\"" | "\\") ~ ANY)* }
+
+DATETIME_STRING = ${ "d\"" ~ DATETIME_STRING_INNER ~ "\"" }
+DATETIME_STRING_INNER = @{ (ESCAPE_SEQ | !("\"" | "\\") ~ ANY)* }
+
+ESCAPE_SEQ = @{ "\\" ~ ANY }
+
+// Numbers
+INT = @{ "-"? ~ ASCII_DIGIT+ }
+FLOAT = @{ "-"? ~ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+ }
+INF = @{ ("-" | "+")? ~ "inf" }
+
+// Identifiers — must not be a bare keyword.
+// We check that the matched word is not exactly a keyword by requiring
+// that after the keyword text there is at least one more identifier char.
+// This way "session_id" is an IDENTIFIER but "session" alone is not.
+IDENTIFIER = @{
+    !(KEYWORD ~ !(ASCII_ALPHANUMERIC | "_"))
+    ~ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*
+}
+
+KEYWORD = _{
+    "let" | "tool" | "result" | "session" | "when" | "always"
+    | "must" | "hard" | "should" | "soft" | "allow" | "deny"
+    | "priority" | "true" | "false" | "bool" | "int" | "float"
+    | "str" | "datetime" | "matching" | "like" | "length"
+    | "not" | "and" | "or" | "in" | "overlaps" | "subset"
+    | "superset" | "of" | "is" | "empty" | "universal"
+    | "union" | "intersect" | "minus" | "xor"
+    | "with" | "without" | "from" | "args" | "inf"
+    | "before" | "after" | "value"
+}
+
+NEWLINE = _{ "\n" | "\r\n" }
