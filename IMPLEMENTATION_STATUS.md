@@ -10,7 +10,7 @@
 | Phase | Crate | Status | Tests | Notes |
 |-------|-------|--------|-------|-------|
 | 1 | `security-compass-meta` | ✅ Complete | 67 pass | Metadata types, propagation, ConsumerSet, ValueWithMeta |
-| 2 | `sqrt-parser` | 🔲 Not started | — | SQRT grammar → AST |
+| 2 | `sqrt-parser` | ✅ Complete | 58 pass | SQRT grammar → AST (pest PEG parser) |
 | 3 | `sqrt-eval` | 🔲 Not started | — | Policy evaluation engine |
 | 4 | `sequrity-vm` | 🔲 Not started | — | Forked Monty with metadata hooks |
 | 5 | `security-compass-interpreter` | 🔲 Not started | — | VM + metadata + policy wired together |
@@ -52,17 +52,50 @@
 
 ---
 
-## Phase 2: `sqrt-parser` 🔲
+## Phase 2: `sqrt-parser` ✅
 
-**Branch:** TBD (will use worktree)
+**Branch:** `phase2/sqrt-parser`
 **Depends on:** `security-compass-meta`
+**Tests:** 58 passed, 0 failed
 
-### Planned scope
+### What was built
 
-- Translate SQRT Lark grammar to `pest` PEG
-- Parse into typed AST: `SqrtProgram`, `ToolDecl`, `CheckRule`, `Predicate`, `SetExpr`, `TypeDomain`
-- Support: let declarations, tool policies (full + shorthand), regex tool IDs, doc comments
-- All type domains: bool, int (ranges), float (ranges), str (exact/regex/wildcard + length), datetime
+| File | Purpose |
+|------|---------|
+| `src/sqrt.pest` | Complete pest PEG grammar (faithfully translated from Lark Earley grammar) |
+| `src/ast.rs` | Typed AST: 30+ types covering all SQRT language features |
+| `src/parser.rs` | Pest parse pairs → typed AST conversion (~1340 lines) |
+| `src/error.rs` | `SqrtParseError` with line/column info and caret-pointed source snippets |
+| `src/tests.rs` | 58 comprehensive tests covering all SQRT features and edge cases |
+| `src/lib.rs` | Public re-exports (`parse()`, `validate()`, all AST types) |
+
+### Key design decisions
+
+- **Lark → pest translation**: Left-recursion rewritten as repetition (PEG limitation); operator precedence encoded in grammar structure
+- **Predicate precedence** (low→high): `or`, `and`, `not`, atom
+- **Set operator precedence** (low→high): `xor`, `minus`, `intersect`, `union`, `with`/`without`
+- **IDENTIFIER keyword exclusion**: Word-boundary checking pattern prevents keywords from being parsed as identifiers while allowing keyword-prefixed names (e.g., `session_id`)
+- **Set operator disambiguation**: Negative lookahead prevents `|=` from matching as union `|`
+- **predicate_not fix**: Uses span comparison to detect silently-consumed `"not"` keyword in pest PEG
+
+### Test coverage areas
+
+- Empty/whitespace/comment-only programs
+- Let declarations (set literals, empty sets, regex sets, predicates)
+- Tool shorthand (simple, priority, session targets, conditions, regex IDs)
+- Tool declarations (check rules, hard/soft aliases, result blocks, session blocks, priority)
+- Predicates (and, or, not, double not, not+and precedence, ref, parenthesized)
+- Set comparisons (subset, superset, equals, is_empty, is_universal, overlaps)
+- Value comparisons (in, equals)
+- Set operations (union, intersect, minus, keyword ops)
+- Type domains (bool, int ranges, int exclusive, str with length, str wildcard)
+- Meta field access (@args, @session, @result, arg.field, aggregation)
+- Metadata updates (all augmented assign ops: =, |=, &=, -=, ^=)
+- Result/session conditionals
+- Doc comments, escaped strings, multiple declarations
+- Complex real-world examples (data leak prevention, PII protection, refund workflow)
+- Error cases (missing semicolon, unclosed brace, invalid enforcement)
+- AST serialization roundtrip
 
 ---
 
