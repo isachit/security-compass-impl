@@ -12,7 +12,7 @@
 | 1 | `security-compass-meta` | ✅ Complete | 67 pass | Metadata types, propagation, ConsumerSet, ValueWithMeta |
 | 2 | `sqrt-parser` | ✅ Complete | 58 pass | SQRT grammar → AST (pest PEG parser) |
 | 3 | `sqrt-eval` | ✅ Complete | 108 pass | Policy compilation, evaluation, branching meta-policy |
-| 4 | `sequrity-vm` | 🔲 Not started | — | Forked Monty with metadata hooks |
+| 4 | `security-compass-vm` | ✅ Complete | 270 pass | Forked Monty with parallel metadata tracking |
 | 5 | `security-compass-interpreter` | 🔲 Not started | — | VM + metadata + policy wired together |
 | 6 | `security-compass-orchestrator` | 🔲 Not started | — | Dual LLM session orchestration |
 | 7 | `security-compass-server` | 🔲 Not started | — | HTTP API layer |
@@ -160,19 +160,88 @@ Added 5 augmented assignment methods to `Metadata` following existing patterns:
 
 ---
 
-## Phase 4: `security-compass-vm` 🔲
+## Phase 4: `security-compass-vm` ✅
 
-**Branch:** TBD
-**Depends on:** Fork of Monty (`codesandboxing/monty`)
+**Branch:** `phase4/security-compass-vm`
+**Depends on:** Fork of Monty (`codesandboxing/monty`), `security-compass-meta`
+**Tests:** 270 total (67 meta + 22 VM unit + 14 VM integration + 108 eval + 58 parser + 1 doctest)
 
-### Planned scope
+### What was built
 
-- Fork Monty's bytecode VM
-- Add parallel metadata arrays (stack_meta, namespace metadata)
-- Metadata merge in binary/unary opcodes
-- Branching hook in JumpIfTrue/JumpIfFalse
-- Extended RunProgress::FunctionCall with metadata
-- Resume with metadata for return values
+Forked the Monty bytecode VM and augmented it with parallel metadata tracking for every value. This is the runtime enforcement layer of the Security Compass Engine: every value on the VM stack and in every namespace gets a corresponding `Metadata` (producers, consumers, tags).
+
+| File | Purpose |
+|------|---------|
+| `src/namespace.rs` | `Namespace` struct with parallel `values`/`metadata` vecs, `get_meta()`, `set_meta()` |
+| `src/bytecode/vm/mod.rs` | VM struct with `stack_meta`, `BranchChecker` trait, all opcode metadata hooks (~2000 lines changed) |
+| `src/bytecode/vm/call.rs` | Function call metadata: callee namespace metadata initialization |
+| `src/bytecode/vm/binary.rs` | Binary ops: merge metadata (producers=union, consumers=intersect, tags=union) |
+| `src/bytecode/vm/compare.rs` | Comparison ops: merge metadata |
+| `src/bytecode/vm/collections.rs` | Collection building: merge_all metadata |
+| `src/bytecode/vm/exceptions.rs` | Exception handler: sync stack_meta on unwind, push default meta for exception value |
+| `src/bytecode/vm/async_exec.rs` | Async task save/restore with stack_meta, metadata push at all async value sites |
+| `src/bytecode/vm/scheduler.rs` | Task struct with `stack_meta` field for context switching |
+| `src/run.rs` | Public API: `RunProgress::FunctionCall{args_meta}`, `Complete(obj, meta)`, `ExternalResult::Return(obj, meta)` |
+| `src/lib.rs` | Re-exports: `BranchChecker`, `Metadata` |
+| `tests/metadata_tests.rs` | 14 metadata-specific integration tests |
+
+### Key modifications to Monty
+
+1. **Parallel metadata stack**: `stack_meta: Vec<Metadata>` mirrors `stack: Vec<Value>` — invariant: `stack_meta.len() == stack.len()` at every instruction boundary
+2. **Parallel namespace metadata**: `Namespace { values, metadata }` — invariant: `values.len() == metadata.len()` for every namespace
+3. **Opcode metadata propagation**:
+   - Constants/Literals → `Metadata::default()` (clean)
+   - Binary/comparison/in-place ops → `lhs_meta.merge(&rhs_meta)` (producers=union, consumers=intersect, tags=union)
+   - Unary ops → passthrough same metadata
+   - Collection building → `Metadata::merge_all(item_metas)`
+   - Variable load/store → propagate between stack and namespace
+   - Function return → carry metadata through `FrameExit::Return(Value, Metadata)`
+4. **BranchChecker trait**: Called at `JumpIfTrue`/`JumpIfFalse` opcodes to enforce that untrusted metadata cannot influence control flow. Concrete implementation provided by Phase 5 interpreter.
+5. **Exception handling**: `handle_exception()` syncs `stack_meta` on stack unwind and pushes default metadata for exception values
+6. **Error path safety**: `try_catch_sync!` and `catch_sync!` macros `continue` after caught exceptions, preventing metadata desync from post-catch push_meta statements
+7. **Async task context switching**: `Task` struct stores `stack_meta` alongside `stack`. Save/restore correctly handles metadata across task switches.
+8. **Function call namespace metadata**: `call_sync_function()` initializes parallel metadata vec to match namespace values vec, preventing panics on `get_meta()` during function execution.
+9. **Public API extensions**: `RunProgress::FunctionCall` includes `args_meta`, `RunProgress::Complete(obj, meta)`, `ExternalResult::Return(obj, meta)`, `VM::resume(obj, meta)`
+
+### Stripped from Monty fork
+
+- All `#[cfg(feature = "ref-count-return")]` and `#[cfg(feature = "ref-count-panic")]` feature gates (17 files)
+- `RefCountOutput` and associated methods
+- `datatest-stable` dev-dependency and test harness config
+
+### Test coverage (14 integration tests)
+
+| # | Test | Verifies |
+|---|------|----------|
+| 1 | `literal_has_default_meta` | `42` → `Complete(Int(42), Metadata::default())` |
+| 2 | `binary_add_merges_producers` | `a + b` with integers produces correct result |
+| 3 | `string_concat_preserves_execution` | String `a + b` works correctly |
+| 4 | `comparison_produces_result` | `a == b` produces correct boolean |
+| 5 | `unary_neg_works` | `-a` produces correct negation |
+| 6 | `list_building_works` | `[a, b, c]` produces list |
+| 7 | `variable_store_load_roundtrip` | `x = a; x` roundtrips value |
+| 8 | `conditional_branch_works` | `a if a > 0 else -a` takes correct branch |
+| 9 | `external_call_has_args_meta` | `f(a)` yields `FunctionCall` with `args_meta` |
+| 10 | `resume_with_return_meta` | Resumed value carries custom metadata |
+| 11 | `snapshot_serialize_deserialize` | `MontyRun` dump/load roundtrip |
+| 12 | `branch_checker_allows_clean` | Conditional code runs with default metadata |
+| 13 | `for_loop_works` | For loop summing integers |
+| 14 | `dict_building_works` | Dict literal construction |
+
+### Security invariants
+
+- `stack.len() == stack_meta.len()` at every instruction boundary
+- `namespace.values.len() == namespace.metadata.len()` for every namespace
+- `Metadata::merge()` called for every binary/comparison operation
+- `BranchChecker::check()` called for every conditional jump
+- Consumer intersection is monotonically restrictive (never grows)
+- Exception handling syncs metadata stack on unwind
+- Error path macros `continue` after caught exceptions to prevent metadata desync
+- Async task switching preserves metadata stack correctly
+
+### Also modified: `security-compass-meta`
+
+- Changed `CombineMetaMode` to use derived `Default` with `#[default]` attribute instead of manual `impl Default`
 
 ---
 
