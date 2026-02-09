@@ -169,6 +169,31 @@ impl Metadata {
     pub fn consumers_difference_assign(&mut self, new_consumers: &ConsumerSet) {
         self.consumers = self.consumers.difference(new_consumers);
     }
+
+    /// Apply an augmented symmetric difference (XOR) to tags: `@tags ^= new_tags`.
+    pub fn tags_xor_assign(&mut self, new_tags: &BTreeSet<String>) {
+        self.tags = self.tags.symmetric_difference(new_tags).cloned().collect();
+    }
+
+    /// Apply an augmented intersection assignment to producers: `@producers &= new_producers`.
+    pub fn producers_intersect_assign(&mut self, new_producers: &BTreeSet<String>) {
+        self.producers = self.producers.intersection(new_producers).cloned().collect();
+    }
+
+    /// Apply an augmented difference assignment to producers: `@producers -= new_producers`.
+    pub fn producers_difference_assign(&mut self, new_producers: &BTreeSet<String>) {
+        self.producers = self.producers.difference(new_producers).cloned().collect();
+    }
+
+    /// Apply an augmented symmetric difference (XOR) to producers: `@producers ^= new_producers`.
+    pub fn producers_xor_assign(&mut self, new_producers: &BTreeSet<String>) {
+        self.producers = self.producers.symmetric_difference(new_producers).cloned().collect();
+    }
+
+    /// Apply an augmented symmetric difference (XOR) to consumers: `@consumers ^= new_consumers`.
+    pub fn consumers_xor_assign(&mut self, new_consumers: &ConsumerSet) {
+        self.consumers = self.consumers.symmetric_difference(new_consumers);
+    }
 }
 
 impl Default for Metadata {
