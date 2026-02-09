@@ -11,7 +11,7 @@
 |-------|-------|--------|-------|-------|
 | 1 | `security-compass-meta` | ✅ Complete | 67 pass | Metadata types, propagation, ConsumerSet, ValueWithMeta |
 | 2 | `sqrt-parser` | ✅ Complete | 58 pass | SQRT grammar → AST (pest PEG parser) |
-| 3 | `sqrt-eval` | 🔲 Not started | — | Policy evaluation engine |
+| 3 | `sqrt-eval` | ✅ Complete | 108 pass | Policy compilation, evaluation, branching meta-policy |
 | 4 | `sequrity-vm` | 🔲 Not started | — | Forked Monty with metadata hooks |
 | 5 | `security-compass-interpreter` | 🔲 Not started | — | VM + metadata + policy wired together |
 | 6 | `security-compass-orchestrator` | 🔲 Not started | — | Dual LLM session orchestration |
@@ -99,18 +99,64 @@
 
 ---
 
-## Phase 3: `sqrt-eval` 🔲
+## Phase 3: `sqrt-eval` ✅
 
-**Branch:** TBD
+**Branch:** `phase3/sqrt-eval`
 **Depends on:** `sqrt-parser`, `security-compass-meta`
+**Tests:** 108 passed, 0 failed
 
-### Planned scope
+### What was built
 
-- Compile parsed SQRT into `CompiledPolicy` (indexed by tool name, regex pre-compiled)
-- Evaluate policies against `ToolCallContext` → `PolicyDecision` (Allow/Deny)
-- Priority-based rule resolution with must/should enforcement
-- Branching meta-policy check
-- Internal policy preset defaults (default_allow, non-executable memory, llm_blocked)
+| File | Purpose |
+|------|---------|
+| `src/error.rs` | `CompileError`, `EvalError`, `BranchingDenied` error types |
+| `src/types.rs` | `CompiledPolicy`, `CompiledToolPolicy`, `ResolvedLetValue`, `SetExprResolved`, `InternalPolicyPreset`, `BranchingMetaPolicy`, `BranchingMode`, `ToolCallContext`, `ResolvedUpdate`, `PolicyDecision` |
+| `src/context.rs` | `EvalContext` (internal), `FieldValue` enum (StringSet/Consumers) with full set algebra |
+| `src/value_match.rs` | `matches_type_domain()`, `matches_set_element()` — value matching against TypeDomain/SetElement |
+| `src/set_eval.rs` | `eval_set_expr()` — SetExpr → FieldValue evaluation (all variants) |
+| `src/predicate_eval.rs` | `eval_predicate()` — Predicate → bool with short-circuit (all 8 comparison types) |
+| `src/metadata_update.rs` | `resolve_metadata_stmts()`, `apply_update()`, `apply_updates()` — all 5 ops × 3 fields |
+| `src/compiler.rs` | `compile()` — SqrtProgram → CompiledPolicy (static set optimization, regex pre-compile, shorthand expansion) |
+| `src/evaluator.rs` | `evaluate()` — priority-sorted must/should rule resolution with fail-fast; `check_branch()` — branching meta-policy enforcement |
+| `src/tests.rs` | 108 comprehensive tests (compiler, value matching, set eval, predicate eval, metadata updates, evaluator, branching, integration) |
+| `src/lib.rs` | Public re-exports |
+
+### Key design decisions
+
+- **CompiledToolPolicy stores `Vec<MetadataStmt>`** (not flattened updates) because metadata updates can be conditional (`when pred { updates }`). Flattening happens at eval time.
+- **ResolvedUpdate** is a concrete struct with pre-evaluated `BTreeSet<String>` and `ConsumerSet`, avoiding re-evaluation of set expressions.
+- **FieldValue** enum (StringSet | Consumers) handles tags/producers vs consumers duality, with cross-type promotion in set operations.
+- **Static set optimization**: Compile-time resolution for pure-literal sets (no runtime operands).
+- **Priority semantics**: Rules are evaluated in priority-descending order. `must` rules trigger immediate return. A higher-priority `must allow` preempts a lower-priority `must deny`.
+- **UpdateTriple type alias** avoids complex return types in evaluator internals.
+
+### Test coverage areas
+
+- **Compiler (16 tests)**: empty program, let static/dynamic sets, exact/regex tools, shorthand expansion (result/session before/after), errors (bad regex, duplicate var), priority, result/session blocks, conditions, multiple same-name tools
+- **Value matching (16 tests)**: bool, int ranges (exact/inclusive/exclusive/from/to), float, string patterns (exact/regex/wildcard + length), set elements (string/regex/wildcard/number/type domain)
+- **Set evaluation (15 tests)**: literals, empty literals, operand resolution (arg tags, session producers, session consumers), union/intersect/minus/xor, with/without, let ref (static), undefined ref error, aggregation (union/intersect), consumer interop
+- **Predicate evaluation (13 tests)**: and/or with short-circuit, not, ref, value-in (found/not-found), value-equals, set-overlaps (true/false), subset-of, superset-of, set-equals, set-is-empty, set-is-universal (true/false)
+- **Metadata updates (11 tests)**: all 5 ops for tags (assign/union/intersect/minus/xor), producers (union), consumers (intersect/union), multiple updates, conditional resolution (true/false)
+- **Evaluator (13 tests)**: must deny/allow immediate, should deny, should allow overrides should deny, higher-priority preemption, no matching policy (default allow/deny), fail-fast, regex matching, result updates collection, let variable usage, condition-when-false
+- **Branching (7 tests)**: deny mode (no overlap ok, producer overlap denied, tag overlap denied), allow mode (subset ok, not-subset denied, extra tags denied), clean metadata always passes
+- **Integration (8 tests)**: data leak prevention, PII protection with regex, session tracking, conditional result updates, multiple policy metadata collection, value-in checks, producer provenance, shorthand with condition
+
+### Security invariants verified by tests
+
+- `must deny` at equal or higher priority always fires (cannot be overridden by lower-priority rules)
+- Priority ordering is deterministic (stable sort for equal priorities preserves declaration order)
+- Consumer intersection monotonicity preserved through all metadata update operations
+- Branching meta-policy enforcement blocks untrusted metadata from influencing control flow
+- Fail-fast mode returns immediately on first deny without processing remaining rules
+
+### Also modified: `security-compass-meta`
+
+Added 5 augmented assignment methods to `Metadata` following existing patterns:
+- `tags_xor_assign()` — symmetric difference for tags
+- `producers_intersect_assign()` — intersection for producers
+- `producers_difference_assign()` — difference for producers
+- `producers_xor_assign()` — symmetric difference for producers
+- `consumers_xor_assign()` — symmetric difference for consumers
 
 ---
 
