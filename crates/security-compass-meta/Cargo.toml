@@ -1,0 +1,13 @@
+[package]
+name = "security-compass-meta"
+description = "Metadata types and propagation logic for the Security Compass engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
