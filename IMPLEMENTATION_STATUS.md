@@ -14,7 +14,7 @@
 | 3 | `sqrt-eval` | ✅ Complete | 108 pass | Policy compilation, evaluation, branching meta-policy |
 | 4 | `security-compass-vm` | ✅ Complete | 270 pass | Forked Monty with parallel metadata tracking |
 | 5 | `security-compass-interpreter` | ✅ Complete | 60 pass | VM + metadata + policy wired together |
-| 6 | `security-compass-orchestrator` | 🔲 Not started | — | Dual LLM session orchestration |
+| 6 | `security-compass-orchestrator` | ✅ Complete | 65 pass | Dual LLM session orchestration |
 | 7 | `security-compass-server` | 🔲 Not started | — | HTTP API layer |
 
 ---
@@ -320,19 +320,72 @@ Five targeted changes to support the interpreter:
 
 ---
 
-## Phase 6: `security-compass-orchestrator` 🔲
+## Phase 6: `security-compass-orchestrator` ✅
 
-**Branch:** TBD
-**Depends on:** `security-compass-interpreter`, `security-compass-meta`
+**Branch:** `phase6/security-compass-orchestrator`
+**Depends on:** `security-compass-interpreter`, `security-compass-meta`, `sqrt-eval`
+**Tests:** 65 passed, 0 failed
 
-### Planned scope
+### What was built
 
-- Session management with turn limits
-- PLLM system prompt construction
-- Code extraction from PLLM response
-- QLLM routing for parse_with_ai
-- Retry loop with error formatting
-- LlmClient and ToolExecutor traits
+The orchestrator drives the dual-LLM conversation loop. It takes user messages, calls the PLLM for Python code generation, executes that code through the interpreter, handles tool calls and QLLM routing at each yield point, and implements retry logic for recoverable errors.
+
+| File | Purpose |
+|------|---------|
+| `src/error.rs` | `OrchestratorError` enum: 10 variants (NoCodeBlock, ClarificationRequested, MaxAttemptsExceeded, MaxTurnsExceeded, LlmError, ToolError, InterpreterError, SerdeError, QllmInsufficientInfo, InternalToolDisabled) |
+| `src/types.rs` | `Session`, `SessionConfig`, `Message`, `Role`, `TurnResult`, `TurnStatus`, `ToolCallSummary`, `ErrorClass`, `InterpreterLoopResult`, config enums |
+| `src/traits.rs` | `LlmClient` and `ToolExecutor` async traits (via `async_trait`) |
+| `src/code_extraction.rs` | `extract_code_block()` — markdown fence parsing (Python-specific, generic fallback, clarification detection) |
+| `src/prompt_builder.rs` | `build_pllm_system_prompt()` — 8-section prompt (role, constraints, format, tools, internal tools, builtins, multi-step, clarification); `build_error_feedback()` — retry feedback formatting |
+| `src/qllm.rs` | `call_qllm()` — routes data to QLLM for structured extraction; `call_qllm_verify()` — routes hypothesis verification to QLLM |
+| `src/interpreter_loop.rs` | `Session::run_interpreter_loop()` — core async loop driving synchronous interpreter through yield points |
+| `src/turn.rs` | `Session::process_turn()` — PLLM retry loop with error classification; `classify_error()` — retryable vs fatal classification |
+| `src/lib.rs` | Module declarations + public re-exports |
+| `src/tests.rs` | 65 comprehensive tests with mock infrastructure |
+
+### Key design decisions
+
+- **Async/sync bridge**: The interpreter is fully synchronous with yield points. The orchestrator's async loop calls `interpreter.execute()` synchronously, then at yield points performs async work (tool execution, LLM calls), and resumes synchronously via `interpreter.resume_*()`. No `spawn_blocking` needed.
+- **Borrow management**: `Session` owns both `interpreter` (needs `&mut`) and `config` (needs `&`). Solved by reading config values into locals before the mutable borrow of interpreter in `run_interpreter_loop()`.
+- **Error classification**: `classify_error()` categorizes errors as `VmException` (retryable — PLLM coding mistakes), `PolicyViolation` (retryable — forbidden actions), or `Fatal` (not retryable — LLM failures, serde errors, etc.). Retryable errors extract a message string for PLLM feedback; fatal errors preserve the original error.
+- **`tokio` as dev-dependency only**: The orchestrator doesn't spawn its own runtime or tasks. It's purely async via trait object calls. Only tests need tokio's async runtime.
+- **`LlmClient` and `ToolExecutor` traits**: Abstract over concrete implementations. The server layer (Phase 7) will provide the actual LLM client (OpenAI/OpenRouter) and tool executor.
+- **QLLM security invariant**: The QLLM receives only a system prompt, user data, and output schema — no tool-calling capability. This is enforced by the `chat_completion_with_schema` API shape.
+
+### Session lifecycle
+
+1. `Session::new(policy, config, interp_config, tools)` — creates session with interpreter
+2. `session.process_turn(user_msg, llm_client, tool_executor)` — processes one turn:
+   - Check turn limit → increment → clear meta per config → add user message
+   - Build PLLM system prompt → PLLM retry loop:
+     - Call PLLM → extract code → run interpreter loop
+     - On success: return `TurnResult { status: Success, value, tool_calls, print_output }`
+     - On retryable error: build error feedback → retry
+     - On clarification: return `TurnResult { status: ClarificationNeeded }`
+     - On all attempts exhausted: return `TurnResult { status: MaxAttemptsExceeded }`
+3. `session.reset()` — clears turn count, message history, session metadata
+
+### Test coverage (65 tests)
+
+| Category | Count | What is tested |
+|----------|-------|---------------|
+| Code extraction | 12 | Python/py/generic fences, multiple blocks (first taken), no fence → None, empty block, clarification detection/disabled, trailing whitespace, mixed content, missing closing fence, backticks inside code |
+| Prompt builder | 8 | Role preamble, tool signatures, internal tools (enabled/disabled), clarification section (enabled/disabled), multi-step section, error feedback (minimal level) |
+| Error feedback | 3 | Normal level (includes first error line), Extra level (full details in code block), policy violation (mentions security policy) |
+| QLLM | 6 | Basic extraction, insufficient info, schema forwarding, verify true/false, missing result field defaults to false |
+| Session | 6 | UUID creation, turn zero start, turn limit enforced, reset clears state, message history grows, config accessible |
+| Interpreter loop | 10 | Simple expression, single/multiple tool calls, parse_with_ai routing, verify_hypothesis routing, tool/QLLM error propagation, mixed tool+QLLM, policy deny as interpreter error, internal tool disabled |
+| Turn processing | 12 | Simple success, success with tool call, retry on VM error, retry on no code block, max attempts exceeded, clarification requested, clear meta every turn/attempt, prune/no-prune failed steps, message history updated, fatal error not retried |
+| Integration | 8 | Full turn with policy enforcement, multi-turn session, parse_with_ai/verify_hypothesis end-to-end, policy deny with retry, session meta cleared per config, turn result includes tool calls, turn result includes print output |
+
+### Security invariants verified
+
+- SQRT policy evaluation occurs before any tool call is yielded to the external executor
+- The QLLM has no tool-calling capability (enforced by API shape)
+- Internal tools (parse_with_ai, verify_hypothesis) can be disabled per session config
+- Session metadata clearing follows the configured schedule (Never/EveryAttempt/EveryTurn)
+- Fatal errors (LLM failures, serde errors) are not retried
+- Turn limits are enforced before incrementing the turn count
 
 ---
 

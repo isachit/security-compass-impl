@@ -1,0 +1,25 @@
+[package]
+name = "security-compass-orchestrator"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+
+[lib]
+name = "security_compass_orchestrator"
+path = "src/lib.rs"
+
+[dependencies]
+security-compass-meta = { path = "../security-compass-meta" }
+security-compass-interpreter = { path = "../security-compass-interpreter" }
+sqrt-eval = { path = "../sqrt-eval" }
+serde.workspace = true
+serde_json.workspace = true
+indexmap.workspace = true
+thiserror.workspace = true
+uuid = { version = "1", features = ["v4", "serde"] }
+async-trait = "0.1"
+
+[dev-dependencies]
+serde_json.workspace = true
+sqrt-parser = { path = "../sqrt-parser" }
+tokio = { version = "1", features = ["rt", "macros", "test-util"] }
