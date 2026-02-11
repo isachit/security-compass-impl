@@ -6,6 +6,7 @@ members = [
     "crates/sqrt-eval",
     "crates/security-compass-vm",
     "crates/security-compass-interpreter",
+    "crates/security-compass-orchestrator",
 ]
 
 [workspace.package]
