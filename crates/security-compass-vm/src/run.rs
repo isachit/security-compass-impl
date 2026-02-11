@@ -162,6 +162,61 @@ impl MontyRun {
         // Handle the result using the destructured parts
         handle_vm_result(vm_result, vm_state, executor, heap, namespaces)
     }
+
+    /// Starts execution with caller-provided input metadata and an optional branch checker.
+    ///
+    /// This is the primary entry point for the interpreter layer (Phase 5), which provides:
+    /// - Per-input metadata tracking (e.g., marking values as coming from specific producers)
+    /// - Branch checking policy enforcement via the `BranchChecker` trait
+    ///
+    /// # Arguments
+    /// * `inputs` - Initial input values (must match length of `input_names` from `new()`)
+    /// * `input_metas` - Metadata for each input value (must match length of `inputs`)
+    /// * `resource_tracker` - Resource tracker for the execution
+    /// * `print` - Writer for print output
+    /// * `branch_checker` - Optional policy checker for conditional branching
+    ///
+    /// # Errors
+    /// Returns `MontyException` if:
+    /// - `inputs.len() != input_metas.len()`
+    /// - The number of inputs doesn't match the expected count
+    /// - An input value is invalid (e.g., `MontyObject::Repr`)
+    /// - A runtime error occurs during execution
+    pub fn start_with_meta<T: ResourceTracker>(
+        self,
+        inputs: Vec<MontyObject>,
+        input_metas: Vec<Metadata>,
+        resource_tracker: T,
+        print: &mut impl PrintWriter,
+        branch_checker: Option<Box<dyn crate::bytecode::BranchChecker>>,
+    ) -> Result<RunProgress<T>, MontyException> {
+        if inputs.len() != input_metas.len() {
+            return Err(MontyException::runtime_error(format!(
+                "input count ({}) does not match metadata count ({})",
+                inputs.len(),
+                input_metas.len()
+            )));
+        }
+
+        let executor = self.executor;
+
+        // Create heap and prepare namespaces with caller-provided metadata
+        let mut heap = Heap::new(executor.namespace_size, resource_tracker);
+        let mut namespaces = executor.prepare_namespaces_with_meta(inputs, input_metas, &mut heap)?;
+
+        // Create VM and optionally inject branch checker
+        let mut vm = VM::new(&mut heap, &mut namespaces, &executor.interns, print);
+        if let Some(checker) = branch_checker {
+            vm.set_branch_checker(checker);
+        }
+
+        // Start execution
+        let vm_result = vm.run_module(&executor.module_code);
+
+        let vm_state = vm.check_snapshot(&vm_result);
+
+        handle_vm_result(vm_result, vm_state, executor, heap, namespaces)
+    }
 }
 
 /// Result of a single step of iterative execution.
@@ -314,7 +369,7 @@ impl<T: ResourceTracker + serde::de::DeserializeOwned> RunProgress<T> {
 /// * `T` - Resource tracker implementation
 ///
 /// Serialization requires `T: Serialize + Deserialize`.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 #[serde(bound(serialize = "T: serde::Serialize", deserialize = "T: serde::de::DeserializeOwned"))]
 pub struct Snapshot<T: ResourceTracker> {
     /// The executor containing compiled code and interns.
@@ -328,6 +383,23 @@ pub struct Snapshot<T: ResourceTracker> {
     /// The call_id from the most recent FunctionCall that created this Snapshot.
     /// Used by `run_pending()` to push the correct `ExternalFuture`.
     pending_call_id: u32,
+    /// Optional branch checker for policy enforcement, re-injected into the VM on resume.
+    /// Not serialized — must be re-set by caller after deserialization.
+    #[serde(skip)]
+    branch_checker: Option<Box<dyn crate::bytecode::BranchChecker>>,
+}
+
+impl<T: ResourceTracker> std::fmt::Debug for Snapshot<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Snapshot")
+            .field("executor", &self.executor)
+            .field("vm_state", &self.vm_state)
+            .field("heap", &"<heap>")
+            .field("namespaces", &"<namespaces>")
+            .field("pending_call_id", &self.pending_call_id)
+            .field("branch_checker", &self.branch_checker.as_ref().map(|_| "<checker>"))
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -370,6 +442,15 @@ impl From<MontyFuture> for ExternalResult {
 }
 
 impl<T: ResourceTracker> Snapshot<T> {
+    /// Sets the branch checker for policy enforcement on resume.
+    ///
+    /// The branch checker is not serialized, so it must be re-set by the caller
+    /// after deserialization or before calling `run()` on a snapshot that needs
+    /// branch checking.
+    pub fn set_branch_checker(&mut self, checker: Box<dyn crate::bytecode::BranchChecker>) {
+        self.branch_checker = Some(checker);
+    }
+
     /// Continues execution with the return value or exception from the external function.
     ///
     /// Consumes self and returns the next execution progress.
@@ -397,6 +478,11 @@ impl<T: ResourceTracker> Snapshot<T> {
             &self.executor.interns,
             print,
         );
+
+        // Re-inject the branch checker if one was set
+        if let Some(checker) = self.branch_checker.take() {
+            vm.set_branch_checker(checker);
+        }
 
         // Convert return value or exception before creating VM (to avoid borrow conflicts)
         let vm_result = match ext_result {
@@ -628,6 +714,7 @@ fn handle_vm_result<T: ResourceTracker>(
                 heap,
                 namespaces,
                 pending_call_id: $call_id.raw(),
+                branch_checker: None,
             }
         };
     }
@@ -640,13 +727,21 @@ fn handle_vm_result<T: ResourceTracker>(
         Ok(FrameExit::ExternalCall {
             ext_function_id,
             args,
+            args_meta,
             call_id,
         }) => {
             let function_name = executor.interns.get_external_function_name(ext_function_id);
             let (args_py, kwargs_py) = args.into_py_objects(&mut heap, &executor.interns);
-            // For now, external call args get default metadata
-            // (Phase 5 will extract metadata from the VM stack before the call)
-            let args_meta = vec![Metadata::default(); args_py.len()];
+            // Defensively align args_meta length with args_py length.
+            // Normally these match 1:1, but handle edge cases gracefully.
+            let args_meta = if args_meta.len() == args_py.len() {
+                args_meta
+            } else if args_meta.is_empty() {
+                vec![Metadata::default(); args_py.len()]
+            } else {
+                let merged = Metadata::merge_all(args_meta.iter());
+                vec![merged; args_py.len()]
+            };
 
             Ok(RunProgress::FunctionCall {
                 function_name,
@@ -660,10 +755,19 @@ fn handle_vm_result<T: ResourceTracker>(
         Ok(FrameExit::OsCall {
             function,
             args,
+            args_meta,
             call_id,
         }) => {
             let (args_py, kwargs_py) = args.into_py_objects(&mut heap, &executor.interns);
-            let args_meta = vec![Metadata::default(); args_py.len()];
+            // Defensively align args_meta length with args_py length.
+            let args_meta = if args_meta.len() == args_py.len() {
+                args_meta
+            } else if args_meta.is_empty() {
+                vec![Metadata::default(); args_py.len()]
+            } else {
+                let merged = Metadata::merge_all(args_meta.iter());
+                vec![merged; args_py.len()]
+            };
 
             Ok(RunProgress::OsCall {
                 function,
@@ -829,6 +933,63 @@ impl Executor {
         // Initialize parallel metadata: all slots start with clean (default) metadata.
         // Input metadata will be provided by the caller in Phase 5 (interpreter layer).
         let metadata = vec![security_compass_meta::Metadata::default(); namespace.len()];
+        Ok(Namespaces::new(namespace, metadata))
+    }
+
+    /// Prepares namespaces with caller-provided metadata for input variables.
+    ///
+    /// This mirrors `prepare_namespaces()` but accepts metadata for each input variable
+    /// instead of using `Metadata::default()` for all slots. The metadata layout is:
+    /// - External function slots → `Metadata::default()` (internal VM objects)
+    /// - Input variable slots → caller-provided `input_metas[i]`
+    /// - Remaining uninitialized slots → `Metadata::default()`
+    ///
+    /// # Precondition
+    /// `inputs.len() == input_metas.len()` (validated by caller)
+    fn prepare_namespaces_with_meta(
+        &self,
+        inputs: Vec<MontyObject>,
+        input_metas: Vec<Metadata>,
+        heap: &mut Heap<impl ResourceTracker>,
+    ) -> Result<Namespaces, MontyException> {
+        let Some(extra) = self
+            .namespace_size
+            .checked_sub(self.external_function_ids.len() + inputs.len())
+        else {
+            return Err(MontyException::runtime_error("too many inputs for namespace"));
+        };
+
+        // Build value namespace
+        let mut namespace: Vec<Value> = Vec::with_capacity(self.namespace_size);
+        for f_id in &self.external_function_ids {
+            namespace.push(Value::ExtFunction(*f_id));
+        }
+        for input in inputs {
+            namespace.push(
+                input
+                    .to_value(heap, &self.interns)
+                    .map_err(|e| MontyException::runtime_error(format!("invalid input type: {e}")))?,
+            );
+        }
+        if extra > 0 {
+            namespace.extend((0..extra).map(|_| Value::Undefined));
+        }
+
+        // Build parallel metadata with caller-provided input metadata
+        let mut metadata: Vec<Metadata> = Vec::with_capacity(namespace.len());
+        // External function slots get default metadata
+        for _ in &self.external_function_ids {
+            metadata.push(Metadata::default());
+        }
+        // Input variable slots get caller-provided metadata
+        for meta in input_metas {
+            metadata.push(meta);
+        }
+        // Remaining uninitialized slots get default metadata
+        if extra > 0 {
+            metadata.extend((0..extra).map(|_| Metadata::default()));
+        }
+
         Ok(Namespaces::new(namespace, metadata))
     }
 }

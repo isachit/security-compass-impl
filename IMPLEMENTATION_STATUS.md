@@ -13,7 +13,7 @@
 | 2 | `sqrt-parser` | ✅ Complete | 58 pass | SQRT grammar → AST (pest PEG parser) |
 | 3 | `sqrt-eval` | ✅ Complete | 108 pass | Policy compilation, evaluation, branching meta-policy |
 | 4 | `security-compass-vm` | ✅ Complete | 270 pass | Forked Monty with parallel metadata tracking |
-| 5 | `security-compass-interpreter` | 🔲 Not started | — | VM + metadata + policy wired together |
+| 5 | `security-compass-interpreter` | ✅ Complete | 60 pass | VM + metadata + policy wired together |
 | 6 | `security-compass-orchestrator` | 🔲 Not started | — | Dual LLM session orchestration |
 | 7 | `security-compass-server` | 🔲 Not started | — | HTTP API layer |
 
@@ -245,18 +245,78 @@ Forked the Monty bytecode VM and augmented it with parallel metadata tracking fo
 
 ---
 
-## Phase 5: `security-compass-interpreter` 🔲
+## Phase 5: `security-compass-interpreter` ✅
 
-**Branch:** TBD
+**Branch:** `phase5/security-compass-interpreter`
 **Depends on:** `security-compass-vm`, `sqrt-eval`, `security-compass-meta`
+**Tests:** 60 passed, 0 failed
 
-### Planned scope
+### What was built
 
-- Interpreter execution loop: VM + policy enforcement + metadata tracking
-- Tool call interception with SQRT pre-checks
-- parse_with_ai / verify_hypothesis routing
-- Gas counting and tool call limits
-- Namespace snapshot for debugging
+The interpreter orchestrates VM execution with SQRT policy enforcement. It intercepts every tool call from the VM, evaluates SQRT security policies, enforces branching restrictions, and yields to the caller (orchestrator) for actual tool execution and QLLM routing.
+
+| File | Purpose |
+|------|---------|
+| `src/error.rs` | `InterpreterError` enum: 11 variants (VmError, PolicyCompileError, PolicyEvalError, OsCallDenied, AsyncNotSupported, GasExhausted, ToolCallLimitExceeded, ConversionError, UnknownTool, ArgCountMismatch, LlmBlocked) |
+| `src/types.rs` | `Interpreter`, `InterpreterConfig`, `ExecutionResult`, `ToolDefinition`, `ToolCallRecord`, `ToolCallOutcome`, `CacheMode`, `VmSnapshot` |
+| `src/convert.rs` | `monty_to_json()` / `json_to_monty()` — MontyObject ↔ serde_json::Value bidirectional conversion with depth limit (100) |
+| `src/branch_checker.rs` | `PolicyBranchChecker`: `BranchChecker` trait impl using `sqrt_eval::check_branch()` with `Arc<CompiledPolicy>` |
+| `src/policy.rs` | `positional_to_named()`, `build_tool_call_context()`, `apply_session_updates()`, `apply_result_updates()` — SQRT policy evaluation helpers |
+| `src/execution.rs` | `Interpreter::new()`, `execute()`, `continue_execution()` — core execution loop with policy evaluation, caching, and internal tool routing |
+| `src/resume.rs` | `resume_after_tool_call()`, `resume_after_tool_call_with_cache()`, `resume_after_parse_with_ai()`, `resume_after_verify_hypothesis()` |
+| `src/lib.rs` | Public re-exports |
+| `src/tests.rs` | 60 comprehensive tests |
+
+### Key design decisions
+
+- **`Arc<CompiledPolicy>`**: Shared between `Interpreter` and `PolicyBranchChecker` instances to avoid cloning the compiled policy on every VM start/resume
+- **`ExecutionResult` yield points**: Four variants: `Complete`, `NeedsToolCall`, `NeedsParseWithAi`, `NeedsVerifyHypothesis` — the orchestrator drives execution by matching on these and calling the appropriate resume method
+- **Policy settings sourced from `CompiledPolicy.preset`**: `enable_non_executable_memory` and `enable_llm_blocked_tag` come from the SQRT policy preset rather than `InterpreterConfig`, ensuring the policy is the single authoritative source
+- **Internal tools**: `parse_with_ai` and `verify_hypothesis` are registered as external functions in the VM but handled specially by the interpreter (yielded as QLLM routing requests)
+- **Tool result caching**: Three modes (None, All, DeterministicOnly) with cache keys derived from tool name + serialized argument values. Cache is populated via `resume_after_tool_call_with_cache()` which receives the named args for key computation
+- **Branch checker re-injection**: The `PolicyBranchChecker` is created fresh and injected via `Snapshot::set_branch_checker()` before every VM resume, since the `#[serde(skip)]` field is cleared during snapshot serialization
+- **Defensive metadata alignment**: `args_meta` length is validated against `args` length with fallback strategies (default for empty, merge-and-broadcast for mismatched)
+
+### Execution flow
+
+1. `execute()` → Compile Python code, prepare inputs with metadata, create `PolicyBranchChecker`, start VM with `start_with_meta()`
+2. `continue_execution()` → Loop on `RunProgress` yield points:
+   - **FunctionCall**: Gas check → tool call limit check → convert args to JSON → build named args → route internal tools → check LLM blocked tag → check cache → evaluate SQRT policy → yield or deny
+   - **OsCall**: Return `OsCallDenied` error
+   - **ResolveFutures**: Return `AsyncNotSupported` error
+   - **Complete**: Convert result to JSON, return `ExecutionResult::Complete`
+3. Resume methods apply result/session metadata updates, record tool call history, re-inject branch checker, and resume VM
+
+### Also modified: `security-compass-vm`
+
+Five targeted changes to support the interpreter:
+
+1. **`extract_args_meta_from_surplus()`**: New VM method that extracts per-argument metadata from the `stack_meta` surplus before truncation. Handles three call paths: simple calls (1:1 mapping), keyword calls (take first N), and extended calls (merge-and-broadcast)
+2. **`FrameExit::ExternalCall/OsCall` gains `args_meta: Vec<Metadata>`**: Carries argument metadata from VM to interpreter
+3. **`handle_call_result!` macro updated**: Calls `extract_args_meta_from_surplus()` before `stack_meta.truncate()` to capture metadata
+4. **`start_with_meta()`**: New public method on `MontyRun` that accepts input metadata and an optional branch checker
+5. **`Snapshot::set_branch_checker()`**: New method to re-inject the branch checker after snapshot deserialization (the `#[serde(skip)]` field is cleared during serialization)
+
+### Test coverage (60 tests)
+
+| Category | Count | What is tested |
+|----------|-------|---------------|
+| Convert tests | 18 | None/Bool/Int/Float/String/List/Dict/Tuple/Set/FrozenSet/Bytes/BigInt/Ellipsis/Exception/Path/Repr/nested roundtrips, NaN/Inf→Null, non-string dict keys |
+| Branch checker tests | 8 | Clean metadata passes, deny mode (producer/tag overlap blocked, non-matching allowed), allow mode (subset passes, non-subset blocked), error message format |
+| Execution tests | 13 | Simple expressions, tool call yield/resume, multiple sequential calls, parse_with_ai yield/resume, verify_hypothesis yield/resume, print output capture, gas limit, tool call limit |
+| Policy integration tests | 9 | must deny blocks, must allow permits, try/except catches denied tool, default deny, non-executable tag, input metadata propagation, session meta persistence, clear session meta |
+| Edge case tests | 12 | Empty program, division by zero, syntax error, unknown tool, tool call history, multiple inputs with metadata, list comprehension, conditional expression, for loop with tool calls, deterministic cache hit, non-deterministic not cached |
+
+### Security invariants verified
+
+- Policy checks are pre-execution: SQRT `evaluate()` runs before yielding `NeedsToolCall`
+- Metadata is interpreter-managed: neither PLLM nor QLLM can see or modify metadata
+- Non-executable tag applied to all tool results when `enable_non_executable_memory` is enabled
+- Branching meta-policy enforced at bytecode level via `PolicyBranchChecker`
+- Branch checker is re-injected on every VM resume (not lost through serialization)
+- Consumer intersection remains monotonically restrictive
+- LLM blocked tag prevents routing to QLLM tools
+- `args_meta` correctly extracted from VM stack surplus before truncation
 
 ---
 

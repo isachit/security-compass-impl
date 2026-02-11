@@ -1,0 +1,23 @@
+[package]
+name = "security-compass-interpreter"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+
+[lib]
+name = "security_compass_interpreter"
+path = "src/lib.rs"
+
+[dependencies]
+security-compass-meta = { path = "../security-compass-meta" }
+security-compass-vm = { path = "../security-compass-vm" }
+sqrt-eval = { path = "../sqrt-eval" }
+serde.workspace = true
+serde_json.workspace = true
+indexmap.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+sqrt-parser = { path = "../sqrt-parser" }
+num-bigint = "0.4"
