@@ -16,22 +16,17 @@ pub struct ValueWithMeta<T> {
 
 /// How to combine metadata when a tool result provides explicit metadata.
 /// Used by the `ValueWithMeta` protocol in tool result handling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CombineMetaMode {
     /// Merge the provided metadata with the existing metadata using
     /// the standard propagation rules (producers=union, consumers=intersect, tags=union).
+    #[default]
     Merge,
     /// Replace the existing metadata entirely with the provided metadata.
     Replace,
     /// Ignore the provided metadata and keep the existing metadata.
     Ignore,
-}
-
-impl Default for CombineMetaMode {
-    fn default() -> Self {
-        CombineMetaMode::Merge
-    }
 }
 
 /// A tool result that includes explicit metadata and a combine mode.
