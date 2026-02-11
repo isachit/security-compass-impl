@@ -192,6 +192,8 @@ macro_rules! handle_call_result {
                 reload_cache!($self, $cached_frame);
             }
             Ok(CallResult::External(ext_id, args)) => {
+                // Extract arg metadata from surplus BEFORE truncation
+                let args_meta = $self.extract_args_meta_from_surplus(args.count());
                 $self.stack_meta.truncate($self.stack.len());
                 let call_id = $self.allocate_call_id();
                 // Sync cached IP back to frame before snapshot for resume
@@ -199,10 +201,13 @@ macro_rules! handle_call_result {
                 return Ok(FrameExit::ExternalCall {
                     ext_function_id: ext_id,
                     args,
+                    args_meta,
                     call_id,
                 });
             }
             Ok(CallResult::OsCall(func, args)) => {
+                // Extract arg metadata from surplus BEFORE truncation
+                let args_meta = $self.extract_args_meta_from_surplus(args.count());
                 $self.stack_meta.truncate($self.stack.len());
                 let call_id = $self.allocate_call_id();
                 // Sync cached IP back to frame before snapshot for resume
@@ -210,6 +215,7 @@ macro_rules! handle_call_result {
                 return Ok(FrameExit::OsCall {
                     function: func,
                     args,
+                    args_meta,
                     call_id,
                 });
             }
@@ -236,6 +242,8 @@ pub enum FrameExit {
         ext_function_id: ExtFunctionId,
         /// Arguments for the external function (includes both positional and keyword args).
         args: ArgValues,
+        /// Metadata for each positional argument, extracted from the VM's parallel metadata stack.
+        args_meta: Vec<Metadata>,
         /// Unique ID for this call, used for async correlation.
         call_id: CallId,
     },
@@ -250,6 +258,8 @@ pub enum FrameExit {
         function: OsFunction,
         /// Arguments for the external function (includes both positional and keyword args).
         args: ArgValues,
+        /// Metadata for each positional argument, extracted from the VM's parallel metadata stack.
+        args_meta: Vec<Metadata>,
         /// Unique ID for this call, used for async correlation.
         call_id: CallId,
     },
@@ -1963,9 +1973,47 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
         self.stack_meta.drain(start..).collect()
     }
 
+    /// Extracts positional argument metadata from the stack_meta surplus.
+    ///
+    /// After a call opcode pops values from the value stack (via `pop_n_args` + `pop`)
+    /// but before `stack_meta` is truncated, a "surplus" of metadata entries remains
+    /// in `stack_meta` that correspond to the popped values in stack order (bottom to top):
+    ///
+    /// ```text
+    /// [callable_or_obj_meta, arg0_meta, arg1_meta, ..., arg_{n-1}_meta, [kw_metas...]]
+    /// ```
+    ///
+    /// This method:
+    /// 1. Skips the first surplus entry (callable/receiver object metadata)
+    /// 2. Takes up to `pos_count` entries for positional argument metadata
+    /// 3. For extended calls (tuple unpacking) where fewer surplus entries exist
+    ///    than `pos_count`, merges available entries and broadcasts to all positions
+    fn extract_args_meta_from_surplus(&self, pos_count: usize) -> Vec<Metadata> {
+        let surplus_start = self.stack.len();
+        let surplus_count = self.stack_meta.len() - surplus_start;
+
+        if surplus_count <= 1 || pos_count == 0 {
+            // No args metadata: only callable/obj meta in surplus, or no args
+            return Vec::new();
+        }
+
+        let available_after_skip = surplus_count - 1; // skip callable/obj meta
+
+        if available_after_skip >= pos_count {
+            // Simple call path: 1:1 mapping between surplus entries and positional args
+            self.stack_meta[surplus_start + 1..surplus_start + 1 + pos_count].to_vec()
+        } else {
+            // Extended call path: fewer surplus entries than args (tuple was unpacked)
+            // Merge all non-callable surplus entries and broadcast to all positions
+            let merged = Metadata::merge_all(
+                self.stack_meta[surplus_start + 1..surplus_start + surplus_count].iter(),
+            );
+            vec![merged; pos_count]
+        }
+    }
+
     /// Sets the branch checker for policy enforcement at conditional jumps.
     /// Used by the interpreter layer (Phase 5) to inject policy enforcement.
-    #[allow(dead_code)]
     pub fn set_branch_checker(&mut self, checker: Box<dyn BranchChecker>) {
         self.branch_checker = Some(checker);
     }
