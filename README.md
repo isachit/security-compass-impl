@@ -178,11 +178,12 @@ All 7 implementation phases are complete. The workspace contains 548 tests acros
 
 For detailed documentation, see:
 
-- `IMPLEMENTATION_STATUS.md` -- Per-phase implementation progress and notes
-- `ARCHITECTURE.md` -- System architecture and design decisions
-- `DESIGN.md` -- Detailed design rationale
-- `TESTING.md` -- Test strategy and coverage
-- `EXAMPLES.md` -- Usage examples and walkthroughs
+- [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md) -- Per-phase implementation progress and notes
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) -- System architecture and design decisions
+- [`docs/DESIGN.md`](docs/DESIGN.md) -- Detailed design rationale
+- [`docs/DIAGRAMS.md`](docs/DIAGRAMS.md) -- Mermaid architecture diagrams
+- [`docs/TESTING.md`](docs/TESTING.md) -- Test strategy and coverage
+- [`docs/EXAMPLES.md`](docs/EXAMPLES.md) -- Usage examples and walkthroughs
 
 ## License
 
