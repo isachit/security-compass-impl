@@ -15,7 +15,7 @@
 | 4 | `security-compass-vm` | ✅ Complete | 270 pass | Forked Monty with parallel metadata tracking |
 | 5 | `security-compass-interpreter` | ✅ Complete | 60 pass | VM + metadata + policy wired together |
 | 6 | `security-compass-orchestrator` | ✅ Complete | 65 pass | Dual LLM session orchestration |
-| 7 | `security-compass-server` | 🔲 Not started | — | HTTP API layer |
+| 7 | `security-compass-server` | ✅ Complete | 153 pass | HTTP API layer (axum, OpenAI-compatible) |
 
 ---
 
@@ -389,14 +389,88 @@ The orchestrator drives the dual-LLM conversation loop. It takes user messages, 
 
 ---
 
-## Phase 7: `security-compass-server` 🔲
+## Phase 7: `security-compass-server` ✅
 
-**Branch:** TBD
-**Depends on:** `security-compass-orchestrator`
+**Branch:** `phase7/security-compass-server`
+**Depends on:** `security-compass-orchestrator`, `sqrt-eval`, `sqrt-parser`, `security-compass-meta`
+**Tests:** 153 passed, 0 failed
 
-### Planned scope
+### What was built
 
-- HTTP API (axum): `POST /control/{provider}/v1/chat/completions`
-- Header parsing: X-Security-Features, X-Security-Policy, X-Security-Config, X-Session-Id
-- Session store (in-memory with DashMap)
-- OpenAI-compatible request/response format
+The HTTP API layer wrapping the dual-LLM orchestrator in an axum HTTP server providing OpenAI-compatible chat completion endpoints. Parses security headers, manages sessions with TTL-based expiration, compiles SQRT policies from header values, maps header configuration to `SessionConfig`/`InterpreterConfig`, provides a concrete reqwest-based `LlmClient` for OpenAI/OpenRouter, and returns structured responses in the `ChatCompletionResponse` format.
+
+| File | Purpose |
+|------|---------|
+| `src/error.rs` | `ServerError` enum (10 variants) + axum `IntoResponse` (401/400/404/500) |
+| `src/types/mod.rs` | Sub-module declarations |
+| `src/types/headers.rs` | `FeaturesHeader`, `SecurityPolicyHeader`, `FineGrainedConfigHeader` (~25 fields each with serde defaults) |
+| `src/types/request.rs` | `ChatCompletionRequest`, `RequestMessage` (discriminated union by role), `FunctionTool` |
+| `src/types/response.rs` | `ChatCompletionResponse`, `Choice`, `ResponseContentJsonSchema`, `FinishReason`, `ResponseStatus` |
+| `src/headers.rs` | `parse_headers()` → `ParsedHeaders` (features, policy, config, session_id, api_key, auth_token) |
+| `src/config.rs` | `build_session_config()`, `build_interpreter_config()` — header string enums → orchestrator enums |
+| `src/policy.rs` | `compile_policy()` — `SecurityPolicyHeader` → `CompiledPolicy` (sqrt only; cedar/sqrt-lite → UnsupportedFeature) |
+| `src/session_store.rs` | `SessionStore` (DashMap + TTL expiration, background eviction) |
+| `src/message.rs` | `extract_messages()` — request messages → user query + system prompt + prior history |
+| `src/llm_client.rs` | `OpenAiLlmClient` — reqwest-based `LlmClient` impl for OpenAI/OpenRouter with provider URL routing |
+| `src/tool_executor.rs` | `NoOpToolExecutor` (errors on all calls), `EchoToolExecutor` (echoes args back) |
+| `src/handler.rs` | Axum handlers + `build_response()` + `AppState` — 14-step request processing pipeline |
+| `src/main.rs` | Binary entry point (PORT, SEQURITY_API_KEY, SESSION_TTL_SECS env vars, graceful shutdown) |
+| `src/lib.rs` | Module declarations + public re-exports |
+| `src/tests.rs` | 153 comprehensive tests |
+
+### Key design decisions
+
+- **Session concurrency**: DashMap shard-level locking held across async `process_turn().await`. Acceptable for moderate concurrency; high-load optimization deferred.
+- **Streaming not supported**: `stream: true` rejected with `UnsupportedFeature`. SSE streaming out of scope.
+- **NoOp tool executor**: Tool calls yield errors — no external tool backend in Phase 7. Swappable for real implementation later.
+- **QLLM model heuristic**: `gpt-4*` → `gpt-4o-mini`; otherwise same as PLLM model.
+- **Header defaults**: Missing headers → Python-matching defaults via `serde(default)`.
+- **Policy language**: Only `sqrt` supported; `sqrt-lite`/`cedar` return `UnsupportedFeature`.
+- **URL-encoded header fallback**: JSON header values are URL-decoded as fallback to handle URL-encoded JSON.
+- **OpenAI-compatible error format**: All error responses use `{"error": {"message": "...", "type": "...", "code": N}}`.
+
+### Handler flow (14 steps)
+
+1. Authenticate (Authorization: Bearer vs server_api_key)
+2. Parse headers → `ParsedHeaders`
+3. Validate LLM API key (X-Api-Key required)
+4. Apply defaults for missing headers
+5. Determine PLLM/QLLM model names
+6. Build `SessionConfig` + `InterpreterConfig`
+7. Extract tool definitions from request
+8. Extract messages → user query
+9. Reject streaming
+10. Get or create session (X-Session-Id → SessionStore lookup)
+11. Build `OpenAiLlmClient`
+12. Build `NoOpToolExecutor`
+13. `session.process_turn()` → `TurnResult`
+14. `build_response()` → `ChatCompletionResponse` + X-Session-Id header
+
+### Test coverage (153 tests)
+
+| Category | Count | What is tested |
+|----------|-------|---------------|
+| Type serde | 43 | FeaturesHeader (minimal/full roundtrip), LlmModeName/LlmMode/TaggerName/TaggerMode/ConstraintName/LongProgramSupport serde, SecurityPolicyHeader (defaults/roundtrip), PolicyCodes (single/multiple/combined), EnforcementLevel, InternalPolicyPresetHeader, ControlFlowMetaPolicyHeader, FineGrainedConfigHeader (all defaults/explicit values), CacheToolResultStr/ClearSessionMetaStr/DebugInfoLevelStr/InternalToolStr/SecureVarVisibilityStr all variants, ResponseFormatHeader, ChatCompletionRequest (minimal/with tools), RequestMessage (all 6 role variants), UserContent (text/parts), ChatCompletionResponse roundtrip, ResponseContentJsonSchema (success/failure/unknown), FinishReason/ResponseStatus serde, PolicyLanguage, BranchingModeStr, IncludedRole, empty JSON fallbacks, skip_serializing_if_none |
+| Header parsing | 14 | All headers present, no headers (all None), individual headers only (features/policy/config), invalid JSON → InvalidHeader, valid/invalid UUID for X-Session-Id, bearer token extraction (with/without prefix), API key extraction, URL-encoded header value, malformed JSON error detail, empty string treated as absent |
+| Config mapping | 14 | Default config maps correctly, each CacheMode variant (None/All/DeterministicOnly), ClearSessionMeta (3 variants), DebugInfoLevel (3 variants), SecureVarVisibility (4 variants), InternalTool mapping, fail_fast from policy header propagates, fail_fast absent defaults false, max_tool_calls_per_attempt default 200, model names passed through, response_format maps |
+| Policy compilation | 10 | Empty source compiles, simple SQRT compiles, custom preset with hard enforcement, custom preset with branching config, default preset when None, invalid SQRT → PolicyCompileError, multiple codes concatenated, cedar → UnsupportedFeature, sqrt-lite → UnsupportedFeature, whitespace-only treated as empty |
+| Session store | 10 | Insert and get, nonexistent returns None, TTL expiration, access refreshes TTL, evict_expired removes only expired, multiple sessions coexist, len/is_empty accurate, insert returns correct UUID, short TTL immediately expires, concurrent access |
+| Message extraction | 14 | Single user message, system+user merged, system not merged (last only), multiple system merged, developer treated as system, no user message → error, empty user message → error, multi-turn (last user = query), assistant included/excluded by config, tool included by config, function mapped to assistant, user content parts, empty array → NoUserMessage |
+| Tool executors | 4 | NoOp returns ToolError, NoOp error contains tool name, Echo echoes args, Echo includes status field |
+| Response building | 16 | Success/Error/MaxAttemptsExceeded/ClarificationNeeded status mapping, session_id included, content is valid JSON, content has schema fields, error_info populated/absent, model name, object field, usage included, id format, created timestamp, message role |
+| Error variants | 10 | Unauthorized→401, MissingApiKey→400, InvalidHeader→400, SessionNotFound→404, OrchestratorError→500, NoUserMessage→400, PolicyCompileError→400, UnsupportedFeature→400, InternalError→500, error body format |
+| LLM client | 8 | OpenAI base URL, OpenRouter base URL, unknown provider defaults to OpenAI, content extraction path, error response parsing, JSON schema response format structure, missing content handling, provider URL mapping |
+| Handler integration | 11 | Missing API key→400, unauthorized without auth→401, wrong bearer token→401, LangGraph stub→501, invalid features header→400, invalid SQRT policy→400, stream:true→400, no user message→400, cedar policy→400, invalid JSON body→4xx, named provider route matched |
+
+### Security invariants verified by tests
+
+- Server API key authentication enforced: missing/wrong bearer token → 401
+- LLM API key required: missing X-Api-Key → 400
+- SQRT-only policy language: cedar/sqrt-lite rejected with UnsupportedFeature
+- Invalid SQRT source → PolicyCompileError (never silently ignored)
+- Streaming rejected: `stream: true` returns 400 (unsupported)
+- Session TTL enforced: expired sessions removed, access refreshes TTL
+- All error responses use OpenAI-compatible JSON format
+- Header JSON parsing errors surface as InvalidHeader with detail message
+- Policy enforcement level mapping: `hard` → `Must`, `soft` → `Should` (from sqrt-parser Enforcement)
+- Branching meta-policy configuration propagated through to CompiledPolicy preset
