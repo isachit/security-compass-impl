@@ -1,0 +1,39 @@
+[package]
+name = "security-compass-server"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+
+[[bin]]
+name = "security-compass-server"
+path = "src/main.rs"
+
+[lib]
+name = "security_compass_server"
+path = "src/lib.rs"
+
+[dependencies]
+security-compass-orchestrator = { path = "../security-compass-orchestrator" }
+security-compass-meta = { path = "../security-compass-meta" }
+sqrt-eval = { path = "../sqrt-eval" }
+sqrt-parser = { path = "../sqrt-parser" }
+serde.workspace = true
+serde_json.workspace = true
+indexmap.workspace = true
+thiserror.workspace = true
+uuid = { version = "1", features = ["v4", "serde"] }
+async-trait = "0.1"
+axum = { version = "0.8", features = ["json", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+reqwest = { version = "0.12", features = ["json"] }
+dashmap = "6"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+http = "1"
+
+[dev-dependencies]
+serde_json.workspace = true
+tokio = { version = "1", features = ["rt", "macros", "test-util"] }
+tower = { version = "0.5", features = ["util"] }
+wiremock = "0.6"
